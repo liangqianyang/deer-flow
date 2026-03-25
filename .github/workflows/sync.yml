@@ -20,14 +20,13 @@ jobs:
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'actions@github.com'
           
-          # 2. 添加原作者的上游仓库 (Upstream)
-          git remote add upstream https://github.com/dev-deer/deer-flow.git
+          # 2. 【这里换成了正确的官方原仓库地址】
+          git remote add upstream https://github.com/bytedance/deer-flow.git
           
           # 3. 拉取原作者代码
           git fetch upstream
           
-          # 4. 合并原作者的 main 分支到你自己的 main 分支
-          # 如果有冲突，这一步会失败并发出提醒
+          # 4. 合并原作者的 main 分支到你的 main 分支
           git checkout main
           git merge upstream/main --ff-only || (echo "检测到代码冲突，请手动解决" && exit 1)
           
