@@ -18,7 +18,7 @@ jobs:
           target_repo_token: ${{ secrets.GITHUB_TOKEN }}
           # 注意：下面这里的参数名已经修改
           upstream_repo_access_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_repository: dev-deer/deer-flow  # 这里请确保填写原作者的仓库名
+          upstream_sync_repo: dev-deer/deer-flow  # 这里请确保填写原作者的仓库名
           target_sync_branch: main
           upstream_sync_branch: main
           test_mode: false
