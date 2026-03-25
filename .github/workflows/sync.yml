@@ -9,16 +9,17 @@ jobs:
   sync_latest_from_upstream:
     runs-on: ubuntu-latest
     steps:
+      # 1. 升级到 v4，支持最新的 Node 环境
       - name: Checkout target repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
+      # 2. 升级同步插件到最新版（v3.5+ 通常已修复 Node 警告）
       - name: Sync upstream changes
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
         with:
           target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          # 注意：下面这里的参数名已经修改
           upstream_repo_access_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_sync_repo: dev-deer/deer-flow  # 这里请确保填写原作者的仓库名
+          upstream_repository: dev-deer/deer-flow
           target_sync_branch: main
           upstream_sync_branch: main
           test_mode: false
