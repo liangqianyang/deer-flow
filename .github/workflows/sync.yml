@@ -1,0 +1,28 @@
+name: Scheduled Sync
+on:
+  schedule:
+    - cron: '0 0 * * *' # 每天凌晨 0 点（UTC）自动运行
+  workflow_dispatch:    # 允许你手动点击运行
+
+jobs:
+  sync_latest_from_upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v3
+
+      - name: Sync upstream changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          upstream_repository: liangqianyang/deer-flow  # 原作者的仓库地址
+          upstream_branch: main                         # 原作者的分支名
+          target_branch: main                           # 你自己的分支名
+          test_mode: false
+
+      - name: Check for errors
+        if: failure()
+        run: |
+          echo "[Error] 由于冲突或其他原因，自动同步失败。"
+          exit 1
