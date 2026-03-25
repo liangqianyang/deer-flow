@@ -2,24 +2,34 @@ name: Scheduled Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天凌晨 0 点执行
+    - cron: '0 0 * * *' # 每天凌晨执行
   workflow_dispatch:    # 允许手动触发
 
 jobs:
   sync_latest_from_upstream:
     runs-on: ubuntu-latest
     steps:
-      # 1. 升级到 v4，支持最新的 Node 环境
       - name: Checkout target repo
         uses: actions/checkout@v4
-
-      # 2. 升级同步插件到最新版（v3.5+ 通常已修复 Node 警告）
-      - name: Sync upstream changes
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
         with:
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_repo_access_token: ${{ secrets.GITHUB_TOKEN }}
-          upstream_repository: dev-deer/deer-flow
-          target_sync_branch: main
-          upstream_sync_branch: main
-          test_mode: false
+          fetch-depth: 0 # 获取完整历史，防止合并失败
+
+      - name: Sync from Upstream
+        run: |
+          # 1. 设置 Git 用户信息
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          
+          # 2. 添加原作者的上游仓库 (Upstream)
+          git remote add upstream https://github.com/dev-deer/deer-flow.git
+          
+          # 3. 拉取原作者代码
+          git fetch upstream
+          
+          # 4. 合并原作者的 main 分支到你自己的 main 分支
+          # 如果有冲突，这一步会失败并发出提醒
+          git checkout main
+          git merge upstream/main --ff-only || (echo "检测到代码冲突，请手动解决" && exit 1)
+          
+          # 5. 推送回你自己的仓库
+          git push origin main
