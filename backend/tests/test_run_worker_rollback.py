@@ -1,8 +1,12 @@
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
 
-from deerflow.runtime.runs.worker import _agent_factory_supports_app_config, _rollback_to_pre_run_checkpoint
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.worker import RunContext, _agent_factory_supports_app_config, _build_runtime_context, _install_runtime_context, _rollback_to_pre_run_checkpoint, run_agent
 
 
 class FakeCheckpointer:
@@ -10,6 +14,73 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aput = AsyncMock(return_value=put_result)
         self.aput_writes = AsyncMock()
+
+
+def test_build_runtime_context_includes_app_config_when_present():
+    app_config = object()
+
+    context = _build_runtime_context("thread-1", "run-1", None, app_config)
+
+    assert context["thread_id"] == "thread-1"
+    assert context["run_id"] == "run-1"
+    assert context["app_config"] is app_config
+
+
+def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
+    app_config = object()
+    config = {"context": {"thread_id": "caller-thread"}}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+            "app_config": app_config,
+        },
+    )
+
+    assert config["context"]["thread_id"] == "caller-thread"
+    assert config["context"]["run_id"] == "run-1"
+    assert config["context"]["app_config"] is app_config
+
+
+@pytest.mark.anyio
+async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    app_config = object()
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["astream_context"] = config["context"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_context"] = config["context"]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert captured["factory_context"]["app_config"] is app_config
+    assert captured["astream_context"]["app_config"] is app_config
+    assert run_manager.get(record.run_id).status == RunStatus.success
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
 
 
 @pytest.mark.anyio
@@ -219,6 +290,43 @@ def test_agent_factory_supports_app_config_detects_supported_signature():
         return (config, app_config)
 
     assert _agent_factory_supports_app_config(factory) is True
+
+
+def test_build_runtime_context_defaults_to_thread_and_run_id():
+    ctx = _build_runtime_context("thread-1", "run-1", None)
+    assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
+
+
+def test_build_runtime_context_merges_caller_context():
+    """Regression for issue #2677: keys from ``config['context']`` (e.g. ``agent_name``)
+    must be merged into the Runtime's context so that ``ToolRuntime.context`` — which
+    is what ``setup_agent`` reads — can see them."""
+    caller_context = {"agent_name": "my-agent", "is_bootstrap": True, "model_name": "gpt-4"}
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert ctx["thread_id"] == "thread-1"
+    assert ctx["run_id"] == "run-1"
+    assert ctx["agent_name"] == "my-agent"
+    assert ctx["is_bootstrap"] is True
+    assert ctx["model_name"] == "gpt-4"
+
+
+def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
+    """A malicious or buggy caller must not be able to overwrite the worker-assigned
+    ``thread_id`` / ``run_id`` by stuffing them into ``config['context']``."""
+    caller_context = {"thread_id": "spoofed", "run_id": "spoofed", "agent_name": "ok"}
+
+    ctx = _build_runtime_context("real-thread", "real-run", caller_context)
+
+    assert ctx["thread_id"] == "real-thread"
+    assert ctx["run_id"] == "real-run"
+    assert ctx["agent_name"] == "ok"
+
+
+def test_build_runtime_context_ignores_non_dict_caller_context():
+    ctx = _build_runtime_context("thread-1", "run-1", "not-a-dict")
+    assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
 
 
 def test_agent_factory_supports_app_config_returns_false_when_signature_lookup_fails(monkeypatch):
