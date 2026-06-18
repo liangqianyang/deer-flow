@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -332,6 +334,71 @@ class TestChannelBase:
             assert len(ch.sent_messages) == 0
 
         _run(go())
+
+    def test_send_with_retry_retries_until_success(self, monkeypatch):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        attempts = 0
+        sleep = AsyncMock()
+        monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+        async def flaky_send():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise RuntimeError(f"failure {attempts}")
+            return "sent"
+
+        result = _run(ch._send_with_retry(flaky_send, max_retries=3, log_prefix="[Dummy]"))
+
+        assert result == "sent"
+        assert attempts == 3
+        assert [call.args[0] for call in sleep.await_args_list] == [1, 2]
+
+    def test_log_future_error_handles_cancelled_future(self, caplog):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        fut = Future()
+        fut.cancel()
+
+        with caplog.at_level(logging.ERROR):
+            ch._log_future_error(fut, "prepare_inbound", "m1")
+
+        assert "prepare_inbound" not in caplog.text
+
+    def test_log_future_error_surfaces_future_exception(self, caplog):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        fut = Future()
+        fut.set_exception(RuntimeError("boom"))
+
+        with caplog.at_level(logging.ERROR):
+            ch._log_future_error(fut, "prepare_inbound", "m1")
+
+        assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
+
+    def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.dingtalk import DingTalkChannel
+        from app.channels.discord import DiscordChannel
+        from app.channels.feishu import FeishuChannel
+        from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.slack import SlackChannel
+        from app.channels.telegram import TelegramChannel
+        from app.channels.wechat import WechatChannel
+        from app.channels.wecom import WeComChannel
+
+        bus = MessageBus()
+        defaults = {
+            "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
+            "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
+            "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
+            "slack": SlackChannel(bus=bus, config={}).supports_streaming,
+            "telegram": TelegramChannel(bus=bus, config={}).supports_streaming,
+            "wechat": WechatChannel(bus=bus, config={}).supports_streaming,
+            "wecom": WeComChannel(bus=bus, config={}).supports_streaming,
+        }
+
+        assert {name: caps["supports_streaming"] for name, caps in CHANNEL_CAPABILITIES.items()} == defaults
 
 
 # ---------------------------------------------------------------------------
@@ -4407,12 +4474,10 @@ class TestChannelService:
         """
         from app.channels.service import ChannelService
 
-        stale_file_config = {"feishu": {"enabled": True, "app_id": "file_id", "app_secret": "file_secret"}}
+        def fail_get_app_config():
+            raise AssertionError("configure_channel must not reload file config")
 
-        def mock_get_app_config():
-            return SimpleNamespace(model_extra={"channels": stale_file_config})
-
-        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", fail_get_app_config)
 
         service = ChannelService(channels_config={})
         service._running = True
