@@ -67,6 +67,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Langfuse Tracing](#langfuse-tracing)
       - [Monocle Tracing](#monocle-tracing)
       - [Using Multiple Providers](#using-multiple-providers)
+      - [Personal Access Tokens](#personal-access-tokens)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -343,6 +344,11 @@ If you prefer running services locally:
 
 Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
+
+The documented root `make` commands invoke repository `.sh` files through Bash
+explicitly. They therefore continue to work from source archives or filesystems
+that do not preserve POSIX executable bits. When calling a script directly from
+such a checkout, use `bash ./scripts/<name>.sh ...`.
 
 1. **Check prerequisites**:
    ```bash
@@ -790,6 +796,30 @@ Traces capture span inputs and outputs verbatim — prompts, tool arguments, and
 LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and DeerFlow reports each run to both. If an enabled provider is missing required credentials or fails to initialize, DeerFlow fails fast and names it. Monocle uses a global OpenTelemetry provider rather than a callback; Langfuse shares that provider, so all three can run together. Because both span processors sit on the same shared provider, Monocle's exporters also see Langfuse's spans when both are enabled.
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
+
+#### Personal Access Tokens
+
+Non-interactive clients (CI pipelines, scripts, server-to-server integrations)
+can call the Gateway API with a **personal access token (PAT)** instead of a
+browser session. Create one while logged in via `POST /api/v1/auth/pats` — the
+raw `dfp_...` value is shown exactly once; only its SHA-256 digest is stored —
+then send it as a Bearer credential:
+
+```http
+POST /api/threads/search
+Authorization: Bearer dfp_...
+Content-Type: application/json
+
+{}
+```
+
+Each token runs with its owning user's identity (owner filtering and per-user
+memory keep working), carries a scope set that can only narrow that user's
+permissions, and is admitted only to the thread/run lifecycle routes — every
+other route answers `403` to PAT callers, and a PAT never carries admin
+capability. Tokens can be listed and revoked at any time; revocation is
+immediate. PATs require a database backend (SQLite/PostgreSQL). Full
+reference: [API Reference — Personal Access Tokens](backend/docs/API.md#personal-access-tokens).
 
 ## From Deep Research to Super Agent Harness
 
