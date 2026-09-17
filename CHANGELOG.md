@@ -582,6 +582,24 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **scheduler:** Enforce the global `max_concurrent_runs` budget on SQLite,
+  which previously only held on Postgres. Claiming a queued occurrence counts
+  the executing rows and then promotes one row to `launching`, and Postgres
+  serializes that pair with an advisory lock. SQLite's deferred transaction
+  reserved the writer only at the promoting UPDATE, so claimants racing on
+  distinct rows — a manual trigger overlapping the poller, or a second Gateway
+  process sharing the database file — all read the same stale count, all passed
+  the budget check, and the configured cap was exceeded. ([#5469])
+- **sandbox:** Stop AIO's `glob` from reporting an exactly-full result as
+  truncated. Its `include_dirs` branch returned as soon as it had collected
+  `max_results` matches, so a listing that held exactly that many — and no more
+  — came back flagged as cut off, and the tool told the model the result was
+  incomplete. That branch already holds the whole listing, so it now looks one
+  match past the cap before deciding, matching the sibling `include_dirs=False`
+  branch, which has always decided from the full list. This concerns the
+  filtered-match cap only: the raw-output cap `parse_remote_search_output` owns
+  is a separate limit with its own one-line-past accounting, and the other
+  providers' filtered-match cap is unchanged.
 - **middleware:** Stop a guard that removes tool calls from breaking every later
   turn of a Claude or OpenAI Responses thread. Token-budget and loop-detection
   hard stops, subagent-limit truncation, and safety suppression cleared
@@ -2868,4 +2886,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
 [#5447]: https://github.com/bytedance/deer-flow/pull/5447
+[#5469]: https://github.com/bytedance/deer-flow/pull/5469
 
