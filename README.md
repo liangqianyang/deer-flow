@@ -463,6 +463,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
+   Hook setup calls pre-commit through uv, so uv's tool directory need not be on `PATH`.
+
 3. **(Optional) Pre-pull sandbox image**:
    ```bash
    # Recommended if using Docker/Container-based sandbox
@@ -591,6 +593,12 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Sandbox references in conversation state are server-owned. External run and
+thread-state APIs reject caller-supplied `sandbox` values; when restoring a
+checkpoint, the runtime resolves the reference against the authenticated user
+and thread before a tool can reuse it. A missing runtime thread ID raises an
+error even when the referenced sandbox is cached.
+
 When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
 
 For Docker development, service startup follows `config.yaml` sandbox mode. In Local/Docker modes, `provisioner` is not started.
@@ -617,6 +625,7 @@ already received by the browser, without an additional secret-redaction layer.
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
+For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
@@ -1362,6 +1371,18 @@ custom lifespans, Mounts, and WebSocket routes are not accepted; lifetime resour
 `ExtensionService`, and WebSocket contributions require a future host-owned
 authentication/Origin wrapper. Lifecycle and system-model callbacks use the Gateway's
 canonical notification loop, including subagents on isolated loops.
+
+User-facing extension routes can call
+`deerflow_extension_api.require_run_evidence_reader(request)` (extension API 0.2.2+).
+The Gateway requires authenticated `runs:read` permission and fixes the reader's scope
+to that user, including administrators and internal callers. Caller-supplied IDs cannot
+change that scope. Invisible and missing runs return the same result; changed-run cursors
+cannot be reused directly across users. The optional `resolve_run_evidence_reader(request)`
+returns `None` when the host does not support the capability; the required helper raises
+`NotImplementedError` instead. Denied access raises `PermissionError`. Routes should map
+these exceptions to HTTP 503 and 403 respectively; resolver failures never fall back to
+the global service reader.
+
 Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
 `required: true` makes load failure abort startup; otherwise failures are reported and
 skipped. `enabled: false` skips resolution and import. The manager preserves the extension's
@@ -1869,6 +1890,7 @@ Fact CRUD and Settings-page fact editing are not available for this backend. See
 the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
 
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
+Legacy memory files are normalized when read or imported, including recoverable fact metadata, so older local data remains usable as the schema evolves. Frontend and backend normalization use confidence `0.5` when missing or invalid, default blank sources to `unknown`, and trim fact content.
 
 In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
 
@@ -1894,7 +1916,7 @@ Memory injection follows the configured operation mode. In `middleware` mode, De
 
 An individual Custom Agent can opt out of memory without changing the global setting. Add `memory_enabled: false` to that agent's `users/{user_id}/agents/{name}/config.yaml`. The agent still receives the current-date reminder, but DeerFlow does not inject recalled memory, queue passive or summarization-driven memory updates (including manual `/compact`), expose memory tools, or add memory-tool instructions for that agent. If an existing agent is switched off, its previously injected memory block is removed from checkpoint state before the next model call while its date reminder and conversation remain. Omitting the field (or setting it to `true`) preserves the existing global `memory` behavior.
 
-Single-fact repository operations are genuinely incremental: an upsert/delete reads, journals, writes, and re-indexes only the addressed fact files, and returns an explicit incomplete delta rather than a cache-dependent fake full document. Summary change sets merge the supplied `user`/`history` child keys over the persisted sections so a partial update cannot erase omitted siblings; full imports normalize both sections to the complete compatibility schema before applying replacement values. Manager/API compatibility methods materialize a fresh full document only when their public response contract requires one. Fact-level point operations use separate expected user-memory and fact revisions and may explicitly rebase when every addressed fact precondition still holds. Snapshot-derived operations such as scoped clear, capped create, consolidation, and trimming never replay stale delete/trim sets: a manifest conflict reloads the complete document and recomputes the operation, with a bounded retry. Fact paths use the first two hexadecimal characters of `SHA-256(fact_id)` so generated `fact_*` IDs distribute across shards. The cache token combines the shared JSON's nanosecond mtime, size, and persisted revision; this prevents coarse-mtime same-size writes from returning stale data without scanning fact files. Direct out-of-band Markdown edits require an explicit reload. Storage-specific conflicts and corruption are translated at the MemoryManager boundary; the Gateway returns conflict as HTTP 409 and a stable, non-sensitive corruption error as HTTP 500. Full-document `save()` remains a compatibility API and computes a diff before writing; malformed or missing `facts` can no longer silently erase an agent's Markdown files. Legacy migration preserves non-empty `user`/`history` before deleting an agent `memory.json`; conflicting summaries keep the legacy file and fail loudly instead of choosing a winner.
+Single-fact repository operations are genuinely incremental: an upsert/delete reads, journals, writes, and re-indexes only the addressed fact files, and returns an explicit incomplete delta rather than a cache-dependent fake full document. Summary change sets merge the supplied `user`/`history` child keys over the persisted sections so a partial update cannot erase omitted siblings; full imports normalize both sections to the complete compatibility schema before applying replacement values. Imports reject malformed fact lists or blank/non-text content with HTTP 400 before changing stored memory; recoverable legacy metadata still receives defaults. An explicit empty fact list remains an intentional clear. Manager/API compatibility methods materialize a fresh full document only when their public response contract requires one. Fact-level point operations use separate expected user-memory and fact revisions and may explicitly rebase when every addressed fact precondition still holds. Snapshot-derived operations such as scoped clear, capped create, consolidation, and trimming never replay stale delete/trim sets: a manifest conflict reloads the complete document and recomputes the operation, with a bounded retry. Fact paths use the first two hexadecimal characters of `SHA-256(fact_id)` so generated `fact_*` IDs distribute across shards. The cache token combines the shared JSON's nanosecond mtime, size, and persisted revision; this prevents coarse-mtime same-size writes from returning stale data without scanning fact files. Direct out-of-band Markdown edits require an explicit reload. Storage-specific conflicts and corruption are translated at the MemoryManager boundary; the Gateway returns conflict as HTTP 409 and a stable, non-sensitive corruption error as HTTP 500. Full-document `save()` remains a compatibility API and computes a diff before writing; malformed or missing `facts` can no longer silently erase an agent's Markdown files. Legacy migration preserves non-empty `user`/`history` before deleting an agent `memory.json`; conflicting summaries keep the legacy file and fail loudly instead of choosing a winner.
 
 Legacy facts in `memory.json` migrate automatically into the reserved `__default__` Markdown bucket on the user's first normal memory read. Operators who prefer to audit or complete the migration before serving traffic can run the optional idempotent CLI from `backend/`:
 
