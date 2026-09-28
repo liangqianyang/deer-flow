@@ -323,6 +323,26 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** `GET` and `PUT /api/user-profile` no longer run their
+  filesystem work on the event loop. Both handlers resolved the per-user
+  `USER.md` path (which builds absolute paths on every call), stat'ed, read,
+  created the user bucket and wrote the file inline, while every other
+  handler in the custom-agent router offloads that work with
+  `asyncio.to_thread`. Under the strict Blockbuster gate the pair raised
+  `BlockingError`; in production a slow disk stalled every other request on
+  the worker for the duration. Both handlers now offload the whole
+  resolve-stat-read / resolve-mkdir-write sequence. ([#5935])
+- **docker:** Project-document uploads larger than 1 MB no longer fail with a
+  bare nginx `413` through the unified entry point. `POST
+  /api/projects/{id}/documents` is a multipart upload that Gateway accepts up
+  to `uploads.max_file_size` (50 MiB by default), but no nginx location
+  matched it, so it fell through to the `/api/` catch-all and nginx's default
+  `client_max_body_size 1m` rejected the request before Gateway saw it — a
+  2 MB PDF was refused while the same file uploaded fine into a thread. All
+  three maintained configs (Docker, `make dev`, Helm) now give
+  `/api/projects/{id}/documents` its own location with the thread-uploads
+  settings (100M ceiling, streamed request body) and the read timeout the
+  catch-all already granted; the catch-all itself keeps nginx's defaults. ([#5934])
 - **docker:** The production stack (`make up` / `scripts/deploy.sh`) now starts
   on hosts with IPv6 disabled. `docker/nginx/nginx.conf` also listens on
   `[::]:2026`; on a kernel booted with `ipv6.disable=1` that listen makes nginx
@@ -331,6 +351,21 @@ This release closes that milestone with **181 merged pull requests**.
   `/proc/net/if_inet6` is absent since #2027, and the Helm chart mirrors it;
   the production compose file was the one launcher still without the guard.
   It now uses the same launcher, and starts nginx with `exec` so it is PID 1. ([#5900])
+- **deploy:** `make up` / `scripts/deploy.sh` now honors `BETTER_AUTH_SECRET`
+  and `DEER_FLOW_INTERNAL_AUTH_TOKEN` written to the repo-root `.env`. The
+  script only checked the shell before reloading a persisted secret or
+  generating a new one and exporting it, and Compose interpolation lets shell
+  variables outrank `--env-file`, so the value the deployment docs tell
+  operators to put in `.env` was silently replaced: sessions were signed with
+  a secret the operator never chose, and Gateway workers running outside the
+  stack with the configured token got `401`. A `.env`-provided secret is now
+  left for Compose to read itself (shell → `.env` → persisted file →
+  generated). Whether `.env` provides one is decided by Compose itself — the
+  script renders a stub project with `${KEY}` through `docker compose config`
+  and reads the value back — so `KEY: VALUE` lines and `${VAR}` interpolation
+  count the way Compose counts them on every Compose v2 client. A value that
+  resolves empty, like an exported-but-empty shell variable, still triggers
+  generation because Compose would otherwise pass the empty value through. ([#5928])
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),
@@ -340,6 +375,34 @@ This release closes that milestone with **181 merged pull requests**.
   directory such as `assets` also slipped through path validation and raised
   `IsADirectoryError`. Non-text content is now recorded as no previous text,
   and a directory path is a validation error instead of a crash. ([#5893])
+- **models:** `when_thinking_enabled` and `when_thinking_disabled` no longer
+  replace a profile's whole `extra_body` on the legacy (no `reasoning:` block)
+  path. Both templates were applied with a shallow `dict.update`, so a profile
+  carrying `extra_body: {tool_stream: true}` beside
+  `when_thinking_enabled.extra_body.thinking` / `when_thinking_disabled`
+  templates — the shape of most `extra_body`-based examples in
+  `config.example.yaml` — lost `tool_stream` in both directions, while the
+  synthesized disable payloads and the contract path already deep-merged. Both
+  legacy templates now deep-merge the same way. The merge semantics are: keys
+  are never removed, a template can only add or override, nested mappings
+  inherit the profile's other keys, and template values win on conflicts. The
+  merge also keeps the template's vLLM switch authoritative across its two
+  spellings: when a profile spells the switch differently from its template
+  (`chat_template_kwargs.enable_thinking: false` beside the legacy
+  `thinking: true` alias), the template's value is mirrored onto the profile's
+  spelling, so `VllmChatModel` and plain OpenAI-compatible classes alike send
+  the template's intent under whichever key the server reads — on both the
+  legacy and the contract path, in both directions. Non-mapping template
+  values are forwarded unchanged. Migration note: because keys are never
+  removed, a `when_thinking_disabled` template can no longer clear a key the
+  profile's base `extra_body` sets — a base
+  `extra_body.thinking: {type: enabled, budget_tokens: 4096}` now reaches the
+  provider as `{type: disabled, budget_tokens: 4096}` when thinking is off,
+  which Anthropic-style APIs reject. Enable-only keys such as `budget_tokens`
+  belong in `when_thinking_enabled`, not in the base `extra_body`; the
+  synthesized disable payloads and the contract path already behaved this
+  way. Templates are also deep-copied as they are merged, so constructor
+  kwargs never alias the cached profile. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -1266,6 +1329,16 @@ This release closes that milestone with **181 merged pull requests**.
   referenced. Code-span tokens now split the fragment the same way and strip
   trailing sentence punctuation; dotted filenames such as
   `references/v1.0.md#notes` keep their extension dots. ([#5841])
+- **skills:** Keep the skill review markdown-link scan linear on adversarial
+  input. The extractor re-scanned the same target run from every candidate
+  opener, so a long run of unmatched `[` or a `](`-dense invalid target drove
+  the review quadratic — #5714 measured 19 s on 256 KiB of `[`, and the
+  resource graph scans every text member with `PackageLimits.max_file_bytes`
+  at 64 MiB, so a single large SKILL.md is squarely in scope. The scan now
+  walks candidate openers once, reproducing `finditer` exactly (verified by
+  differential fuzzing against the base regex), and blanks matched spans by
+  position instead of `str.replace`, which could blank an unrelated later copy
+  of the same text. ([#5884])
 - **config:** Sign the bytes the config cache parsed, not a second read. The
   app-config loader opened `config.yaml` twice — parse once, then hash a fresh
   read to record the `(mtime, size, sha256)` signature — so a write landing
@@ -6127,6 +6200,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
+[#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928
+[#5934]: https://github.com/bytedance/deer-flow/pull/5934
+[#5935]: https://github.com/bytedance/deer-flow/pull/5935
 
