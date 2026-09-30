@@ -327,6 +327,36 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **config:** `make config-upgrade` (also run by `make dev` / `make start`)
+  upgrades the `config.yaml` the Gateway loads. With both
+  `<checkout>/config.yaml` and `backend/config.yaml` present, the script
+  upgraded the `backend/` copy while the Gateway read the checkout copy, so the
+  file in use stayed outdated even though the upgrade reported success. It also
+  ignored `DEER_FLOW_PROJECT_ROOT` and a `DEER_FLOW_CONFIG_PATH` set in `.env`,
+  and fell back to another file when `DEER_FLOW_CONFIG_PATH` named a missing
+  one. The script now asks the harness resolver
+  (`AppConfig.resolve_config_path`) for the file, and a missing
+  `DEER_FLOW_CONFIG_PATH` or invalid `DEER_FLOW_PROJECT_ROOT` fails with the
+  Gateway's error instead of upgrading a fallback. ([#5991])
+
+- **sandbox:** Unwrap `Overwrite`-wrapped sandbox state in
+  `ToolOutputBudgetMiddleware` and `ReadBeforeWriteMiddleware`. In delta
+  checkpoint mode, forked or restored threads deliver the `sandbox` channel
+  wrapped in LangGraph's `Overwrite`. Without unwrapping,
+  `isinstance(sandbox_state, dict)` returned `False`, causing large tool output
+  externalization to fail and fall back to inline truncation, and
+  read-before-write lock scoping to miss the active sandbox ID. ([#6051])
+- **doctor:** `make doctor` now checks the config file the Gateway actually
+  loads. It always inspected `<checkout>/config.yaml` and ignored
+  `DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_PROJECT_ROOT`, so a missing override
+  that stops the Gateway from starting still reported `✓ config.yaml found`
+  and `✓ config.yaml loadable`, and a valid override pointing elsewhere got
+  the wrong file checked. Doctor now resolves the path through the harness's
+  own resolver and hands it the location variables the way `make dev` does:
+  `.env` values override the shell (expanding an unquoted leading `~`), and
+  an unset or empty `DEER_FLOW_PROJECT_ROOT` becomes the checkout. An override
+  the Gateway would reject fails `config.yaml found` with the Gateway's
+  error, and the config checks skip. ([#5987])
 - **database:** `DatabaseConfig` now validates `pool_size`, `pool_recycle`, and
   `command_timeout` strictly. Previously, YAML booleans (`true`/`false`) were
   coerced to `1`/`0` respectively, allowing `pool_size: true` (pool size 1) and
@@ -6214,4 +6244,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#5987]: https://github.com/bytedance/deer-flow/pull/5987
+[#5991]: https://github.com/bytedance/deer-flow/pull/5991
+[#6015]: https://github.com/bytedance/deer-flow/pull/6015
 
