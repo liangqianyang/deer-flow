@@ -1,10 +1,8 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This is the source of truth for repository agent guidance; `CLAUDE.md` imports it via `@AGENTS.md`.
 
-It is the **monorepo orientation layer**: it maps the whole repo and points to the
-module guides that own the depth. For anything inside a module, read that module's
-guide rather than expecting full detail here:
+This **monorepo orientation layer** maps the repo. For module details, read its guide:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
@@ -108,6 +106,10 @@ Skill quality review note:
   revision can suppress a run, and blocker findings can never be waived.
 
 Scheduled-task note:
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
   background scheduler gated by `config.yaml -> scheduler.enabled`.
 - Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
@@ -202,9 +204,9 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
-  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
-  in the Gateway terminal.
+- Local `make dev`: Gateway and frontend output goes to
+  `logs/gateway.log` and `logs/frontend.log` in the repository root.
+  Run `tail -f logs/gateway.log logs/frontend.log` there to follow both.
 
 ## Where to Go Next
 
