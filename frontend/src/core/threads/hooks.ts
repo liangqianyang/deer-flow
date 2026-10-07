@@ -238,6 +238,7 @@ export function buildThreadSubmitMessages({
  * `string[]` under `context.conversation_references`, only when the caller
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
+ * `client_timezone` carries the browser's zone (scheduled-task default only).
  */
 export function buildRunContext({
   settings,
@@ -274,7 +275,24 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...clientTimezoneContext(),
   };
+}
+
+/**
+ * The browser's IANA zone as `context.client_timezone`. The Gateway reads it
+ * only to offer a default zone when a chat creates a scheduled task; it never
+ * reaches the model's context. Omitted when the browser cannot tell.
+ */
+function clientTimezoneContext(): { client_timezone?: string } {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.length > 0
+      ? { client_timezone: timeZone }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 // Stable identity for "no optimistic messages" so the merged-messages memo
@@ -1982,24 +2000,35 @@ export function useThreadStream({
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
-  const scheduleActiveRunRejoinRetry = useCallback(() => {
-    const rejoin = activeRunRejoinRef.current;
-    if (!rejoin.inFlight || !rejoin.threadId || !rejoin.runId) {
-      return;
-    }
+  const scheduleActiveRunRejoinRetry = useCallback(
+    (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      const rejoin = activeRunRejoinRef.current;
+      // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
+      // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        !rejoin.inFlight ||
+        !rejoin.threadId ||
+        !rejoin.runId ||
+        run?.thread_id !== rejoin.threadId ||
+        run?.run_id !== rejoin.runId
+      ) {
+        return;
+      }
 
-    rejoin.inFlight = false;
-    clearReconnectRun(rejoin.threadId, rejoin.runId);
-    const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
-    if (retryDelay === undefined) {
-      return;
-    }
+      rejoin.inFlight = false;
+      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+      if (retryDelay === undefined) {
+        return;
+      }
 
-    rejoin.retryTimer = setTimeout(() => {
-      rejoin.retryTimer = null;
-      setActiveRunRejoinRetry((current) => current + 1);
-    }, retryDelay);
-  }, []);
+      rejoin.retryTimer = setTimeout(() => {
+        rejoin.retryTimer = null;
+        setActiveRunRejoinRetry((current) => current + 1);
+      }, retryDelay);
+    },
+    [],
+  );
 
   const settleActiveRunRejoin = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2188,8 +2217,8 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
-      scheduleActiveRunRejoinRetry();
+    onError(error, run) {
+      scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);

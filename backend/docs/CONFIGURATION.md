@@ -505,7 +505,8 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` in their scheduled runs (see "Create schedules in a conversation" in the README).
+- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` to every scheduled run of a task, whether a chat or the tasks page created it (see "Create schedules in a conversation" in the README). A run can stop only its own task's schedule. Managing tasks from chat (create, update, resume, pause, delete, trial, notes) is interactive-only: a conversation manages the tasks created in it and, when it is a task's run conversation, that task; scheduled runs get only their own stop. The tools are offered only while this Gateway process's scheduler is running. With `tool_enabled` off, a task's stop condition is still sent to its runs, phrased so the run reports a met rule instead of calling a tool it does not have. Each launch reads `tool_enabled` from the live config, the same value that decides whether the run gets the tool, so the phrasing always matches.
+- The tasks page and REST API have parity with conversations for the per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`, stored in its own column and appended to the run message only at launch). Resume computes the next run from now without a catch-up run and refuses a one-time task whose time passed; reactivating a task whose cap is used up returns `409 limits_exhausted` unless the same request (for example the optional Resume body `{"max_runs", "end_at"}`) renews or clears the cap. Goal-check failures neither count toward nor reset the three-miss automatic pause, and changing the goal, instructions or stop condition, or adding a note, starts a new count (Resume keeps it). Creating a task while this Gateway process's poller is not running returns `409 scheduler_not_running`; `/api/features` reports `scheduled_tasks.running`. See `backend/docs/API.md#scheduled-tasks`.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
 - `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
@@ -617,13 +618,29 @@ request timeout is capped by the remaining budget; the outer deadline also bound
 responses that keep delivering data. The existing `timeout` remains Jina's
 `X-Timeout` header and the per-request HTTP timeout limit.
 
-Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
-`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
-empty successful responses, read/write timeouts and arbitrary exceptions are not
-retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
-double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
-ceiling by the remaining budget and independently samples a uniform factor from
-0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) are retryable. HTTP 429 is retried **only** with a valid
+`Retry-After` header; missing or malformed hints leave it terminal. HTTP 503
+uses the same hints, falling back to local backoff when they are absent or invalid.
+Authentication, payment/credit and other statuses remain terminal even with hints;
+error-body prose never enables retries. Empty successful responses, read/write
+timeouts and arbitrary exceptions are not retried.
+
+`Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
+(including obsolete HTTP date forms); past dates mean a zero server floor.
+Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
+start at 0.5 seconds, double to 1 and 2, then stay at 4. Each wait caps the local
+ceiling by the remaining budget and samples a uniform factor from 0.5 to 1.0.
+The actual wait is the greater of that local pacing and the server floor. A
+server floor is never reduced by jitter or the 4-second local ceiling. If the
+hinted wait equals or exceeds the remaining budget (including enormous valid
+integers), the last HTTP status error is returned without another request.
+Dates use wall time to compute a delay; requests and waits share one monotonic
+deadline. Each attempt uses only its own hint.
+
+Offline mocked regressions cover these policies; they do not establish that
+Jina's hosted service always supplies recovery hints. No paid-provider testing
+is required to enable this option.
 Cancellation propagates during requests and waits. This stops local work; it
 cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain
