@@ -580,14 +580,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
-        # Record the checkpointer/Store backend selected from this startup
-        # snapshot so GET /health/ready probes what the running process
-        # actually uses. These singletons are restart-required by design and
-        # are never rebuilt on config.yaml hot reload, so the probe must not
-        # re-resolve process-wide configuration per request.
-        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config
+        # Record the checkpointer/Store backend and the provisioner endpoint
+        # selected from this startup snapshot so GET /health/ready probes what
+        # the running process actually uses. These singletons are
+        # restart-required by design and are never rebuilt on config.yaml hot
+        # reload, so the probe must not re-resolve process-wide configuration
+        # per request. The stream bridge needs no snapshot: the probe pings the
+        # singleton stored on app.state.stream_bridge above.
+        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, resolve_checkpointer_config, resolve_provisioner_url
 
         setattr(app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config(config))
+        setattr(app.state, READINESS_PROVISIONER_URL_ATTR, resolve_provisioner_url(config))
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
@@ -669,11 +672,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+            from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
+            from deerflow.persistence.thread_reads import ThreadReadRepository
 
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
@@ -685,6 +690,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 run_repository=app.state.run_store,
             )
+            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
+            # Per-user unread state and the activity feed's read clock.
+            app.state.thread_read_repo = ThreadReadRepository(sf)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
@@ -694,6 +702,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
+            app.state.scheduled_task_event_repo = None
+            app.state.thread_read_repo = None
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -841,6 +851,13 @@ def get_scheduled_task_run_repo(request: Request):
     return val
 
 
+def get_scheduled_task_event_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_event_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task event repo not available")
+    return val
+
+
 def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
@@ -924,6 +941,18 @@ def get_run_context(request: Request) -> RunContext:
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
+
+
+def get_user_repository() -> SQLiteUserRepository:
+    """Return the cached user repository (created on first use).
+
+    Origin: admin user-management surface (RFC #4063 / #3462 gap 2). Shares
+    the ``get_local_provider`` cache so both surfaces see one store.
+    """
+
+    get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
 
 
 def get_local_provider() -> LocalAuthProvider:

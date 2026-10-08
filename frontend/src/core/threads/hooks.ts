@@ -106,10 +106,14 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once when the send is genuinely dispatched: after the
+   * in-flight guard and after any attachments upload, right before the run is
+   * submitted. It never fires for a dropped send or one whose attachments fail
+   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
+   * clearing quoted references) without losing state a retry still needs.
+   * The guarantee ends at dispatch: a run that fails afterwards does not
+   * reject `thread.submit` (the SDK reports it through the stream's
+   * `onError`), so the send resolves and the composer is cleared as a whole.
    */
   onSent?: () => void;
 };
@@ -1947,6 +1951,9 @@ export function useThreadStream({
   // Keep completed IDs across recovery-state resets so stale "running" data
   // cannot restart a submitted or natively reconnected stream.
   const completedRunIdsRef = useRef(new Set<string>());
+  // onCreated fires only for runs this hook submitted. A failed submit stays
+  // with the submit flow; only SDK reconnects are handed to recovery.
+  const submittedRunIdRef = useRef<string | null>(null);
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -2005,6 +2012,19 @@ export function useThreadStream({
       const rejoin = activeRunRejoinRef.current;
       // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
       // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        run &&
+        !rejoin.inFlight &&
+        run.run_id !== submittedRunIdRef.current &&
+        readReconnectRun(run.thread_id) === run.run_id
+      ) {
+        // The SDK's same-tab reconnect tries once and keeps its pointer on
+        // error, so the recovery effect would keep deferring to a stream that
+        // no longer exists. Release the pointer and let recovery take over.
+        clearReconnectRun(run.thread_id, run.run_id);
+        setActiveRunRejoinRetry((current) => current + 1);
+        return;
+      }
       if (
         !rejoin.inFlight ||
         !rejoin.threadId ||
@@ -2075,6 +2095,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -2293,7 +2314,8 @@ export function useThreadStream({
     }
 
     // A matching pointer means the SDK's native same-tab reconnect owns this
-    // run. Do not create a second SSE consumer.
+    // run. Do not create a second SSE consumer; if that reconnect fails,
+    // scheduleActiveRunRejoinRetry releases the pointer.
     if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
       return;
     }
@@ -2534,10 +2556,6 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -2684,6 +2702,10 @@ export function useThreadStream({
           }
         }
 
+        // Attachments are uploaded, so the send is genuinely dispatched and
+        // callers can drop one-time state. A failed upload rejected above
+        // without reaching here, leaving that state for a retry.
+        options?.onSent?.();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
