@@ -1226,6 +1226,31 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
+  their SDK threads instead of timing out. Both SDKs run on a thread-private
+  event loop that only returned on a fatal error, so every stop joined for
+  5s, raised `ChannelStopTimeout`, and left the platform connection alive on
+  the old process — a restart, a redeploy, and the upcoming per-provider
+  leader hand-off could not release the connection. Each channel now
+  publishes that loop under a lock; `stop()` schedules a shutdown on it, then
+  joins. Feishu disarms lark-oapi's `_auto_reconnect` before closing the
+  socket and stopping the loop, because the SDK's `start()` otherwise swallows
+  the interrupted loop in its reconnect branch and dials again; DingTalk
+  drives its own copy of dingtalk-stream's connect loop (the SDK's is
+  `while True` and catches `CancelledError`), re-checks the running flag
+  before every dial, sends the ticket request itself through `httpx` with a
+  deadline (the SDK's `requests.post` has none, so a stalled endpoint could
+  pin the thread or process exit), and logs only the endpoint rather than
+  the ticket-bearing connection payload. When a peer never answers the close
+  frame, both channels abort the transport themselves instead of leaving the
+  socket to garbage collection, because the bounded close wait cancels
+  websockets' own close-timeout abort. A shared `shutdown_private_loop`
+  cancels the SDK's leftover tasks with a bounded drain and closes the loop,
+  and a stop requested before the client exists never dials.
+  `ChannelStopTimeout` is now reserved for a thread that genuinely wedges
+  inside an SDK call. Telegram already stopped its loop this way and is
+  unchanged. ([#6798])
+
 - **frontend:** The user-management settings page no longer renders a doomed
   query on the static-website demo, and a non-admin `?settings=users` deep
   link no longer opens the admin-only panel. The page gated only on
@@ -5831,6 +5856,13 @@ This release closes that milestone with **621 merged pull requests**.
   default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
   loop for over half a second per page. The exported lines and their order are
   unchanged. ([#6706])
+- **gateway:** The subagent batch item list
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`), which the
+  workspace polls every 2 seconds while a batch runs, no longer loads each
+  item's full report, evidence JSON and prompt only to return its preview.
+  With the default `max_result_chars`, one 100-item page held about 34 MB and
+  blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
+  it now holds under 1 MB. The response is unchanged. ([#6781])
 
 ### Security
 
@@ -11608,3 +11640,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
