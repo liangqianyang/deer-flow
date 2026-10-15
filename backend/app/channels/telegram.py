@@ -14,6 +14,7 @@ from typing import Any
 from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import coerce_file_size, safe_inbound_filename
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
@@ -23,7 +24,6 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +370,8 @@ class TelegramChannel(Channel):
         send_kwargs: dict[str, Any] = {"chat_id": chat_id, "text": display}
         if reply_to:
             send_kwargs["reply_to_message_id"] = reply_to
+            if chat_id > 0:
+                send_kwargs["allow_sending_without_reply"] = True
 
         if state is None:
             try:
@@ -505,6 +507,10 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(chat_key)
         if reply_to:
             kwargs["reply_to_message_id"] = reply_to
+            # A deleted private-chat reply must not block delivery. Keep group
+            # replies strict: dropping their target could change forum routing.
+            if chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
 
         bot = self._application.bot
 
@@ -543,11 +549,15 @@ class TelegramChannel(Channel):
                 kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_photo(**kwargs)
             else:
                 kwargs = {"chat_id": chat_id, "document": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
@@ -838,25 +848,11 @@ class TelegramChannel(Channel):
 
     @staticmethod
     def _file_size(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        try:
-            size = int(value)
-        except (TypeError, ValueError):
-            return None
-        return size if size >= 0 else None
+        return coerce_file_size(value)
 
     @staticmethod
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
-        if not isinstance(value, str):
-            return fallback
-        try:
-            candidate = normalize_filename(value.strip())
-        except (UnicodeError, ValueError):
-            return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
-            return fallback
-        return candidate
+        return safe_inbound_filename(value, fallback)
 
     @classmethod
     def _extract_inbound_files(cls, message: Any) -> list[dict[str, Any]]:
@@ -967,11 +963,11 @@ class TelegramChannel(Channel):
             return
         try:
             bot = self._application.bot
-            sent = await bot.send_message(
-                chat_id=int(chat_id),
-                text="Working on it...",
-                reply_to_message_id=reply_to_message_id,
-            )
+            numeric_chat_id = int(chat_id)
+            kwargs: dict[str, Any] = {"chat_id": numeric_chat_id, "text": "Working on it...", "reply_to_message_id": reply_to_message_id}
+            if numeric_chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
+            sent = await bot.send_message(**kwargs)
             self._register_stream_message(
                 self._stream_key(chat_id, str(reply_to_message_id)),
                 message_id=sent.message_id,
